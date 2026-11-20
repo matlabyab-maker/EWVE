@@ -7,9 +7,11 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.widget.*
 import kotlin.math.max
@@ -17,8 +19,13 @@ import kotlin.math.min
 
 class MainActivity : Activity() {
     private lateinit var video: VideoView
+    private lateinit var preview: ImageView
+    private lateinit var brightnessShade: View
     private var playerHint: TextView? = null
     private var playControl: TextView? = null
+    private var undoControl: TextView? = null
+    private var redoControl: TextView? = null
+    private var mediaPlayer: MediaPlayer? = null
     private var videoReady = false
 
     private val navy = Color.rgb(12, 30, 61)
@@ -28,6 +35,8 @@ class MainActivity : Activity() {
     private val requestVideo = 410
     private val storyboardFrameCount = 120
 
+    private val videos = mutableListOf<Uri>()
+    private var currentVideoIndex = 0
     private val frameIds = (1..storyboardFrameCount).toMutableList()
     private val selectedFrames = mutableSetOf<Int>()
     private val frameTiles = mutableMapOf<Int, FrameLayout>()
@@ -36,10 +45,23 @@ class MainActivity : Activity() {
     private var rangeAnchor: Int? = null
     private var storyboardTitle: TextView? = null
     private var storyboardGrid: GridLayout? = null
+    private var columnSpinner: Spinner? = null
     @Volatile private var extractionGeneration = 0
     private var extractionDone = 0
     private val processorProgress = intArrayOf(0, 0)
     private var videoDurationMs = 0L
+    private var playbackSpeed = 1f
+    private var playerVolume = 1f
+    private var playerBrightness = 1f
+    private var columnCount = 5
+
+    private data class EditState(
+        val ids: List<Int>,
+        val selected: Set<Int>,
+        val anchor: Int?
+    )
+    private val undoStack = ArrayDeque<EditState>()
+    private val redoStack = ArrayDeque<EditState>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,42 +70,33 @@ class MainActivity : Activity() {
         buildScreen()
     }
 
-    private fun bg(color: Int, stroke: Int = Color.rgb(65, 83, 111)): GradientDrawable =
-        GradientDrawable().apply {
-            setColor(color)
-            setStroke(dp(1), stroke)
-        }
+    private fun bg(color: Int, stroke: Int = Color.rgb(65, 83, 111)) =
+        GradientDrawable().apply { setColor(color); setStroke(dp(1), stroke) }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
-    private fun button(
-        label: String,
-        size: Float = 15f,
-        color: Int = white,
-        fill: Int = panel,
-        weight: Float = 1f
-    ): TextView = TextView(this).apply {
-        text = label
-        textSize = size
-        setTextColor(color)
-        gravity = Gravity.CENTER
-        typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        background = bg(fill)
-        setPadding(dp(3), dp(5), dp(3), dp(5))
-        isAllCaps = false
-        layoutParams = LinearLayout.LayoutParams(0, dp(58), weight).apply {
-            setMargins(dp(1), dp(1), dp(1), dp(1))
+    private fun button(label: String, size: Float = 15f, color: Int = white,
+                       fill: Int = panel, weight: Float = 1f): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = size
+            setTextColor(color)
+            gravity = Gravity.CENTER
+            typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+            background = bg(fill)
+            setPadding(dp(3), dp(4), dp(3), dp(4))
+            isAllCaps = false
+            layoutParams = LinearLayout.LayoutParams(0, dp(58), weight).apply {
+                setMargins(dp(1), dp(1), dp(1), dp(1))
+            }
         }
-    }
 
     private fun horizontal(parent: LinearLayout, height: Int = -2): LinearLayout {
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                if (height == -2) LinearLayout.LayoutParams.WRAP_CONTENT else dp(height)
-            )
+            layoutParams = LinearLayout.LayoutParams(-1,
+                if (height == -2) -2 else dp(height))
         }
         parent.addView(row)
         return row
@@ -97,6 +110,7 @@ class MainActivity : Activity() {
         }
         setContentView(page)
 
+        // Top toolbar follows the supplied reference image from left to right.
         val topScroll = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             layoutParams = LinearLayout.LayoutParams(-1, dp(58))
@@ -104,24 +118,23 @@ class MainActivity : Activity() {
         val topRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         topScroll.addView(topRow)
         page.addView(topScroll)
-
-        var deleteButton: TextView? = null
-        listOf(
+        val topItems = listOf(
             "Import\nVideos", "Export\nVideo", "Delete", "Tracks",
             "Color\nAnd Light", "Blur\nSharpen\nNoise", "Merge\nJoin", "Video\nText"
-        ).forEachIndexed { index, title ->
-            val b = button(
-                title,
-                if (index == 1 || index == 3) 15f else 14f,
-                if (index == 2) Color.rgb(255, 90, 100) else white,
-                navy
-            )
+        )
+        topItems.forEachIndexed { index, title ->
+            val b = button(title, 14f,
+                if (index == 2) Color.rgb(255, 90, 100) else white, navy)
             b.layoutParams = LinearLayout.LayoutParams(
-                dp(if (index == 4 || index == 5) 105 else 92), dp(58)
-            )
+                dp(if (index == 4 || index == 5) 105 else 92), dp(58))
             topRow.addView(b)
-            if (index == 0) b.setOnClickListener { chooseVideo() }
-            if (index == 2) deleteButton = b
+            when (index) {
+                0 -> b.setOnClickListener { chooseVideos() }
+                2 -> b.setOnClickListener { deleteSelectedFrames() }
+                1 -> b.setOnClickListener { toast("خروجی ویدیو در مرحله بعد فعال می‌شود") }
+                3 -> b.setOnClickListener { toast("مدیریت ترک‌ها در مرحله بعد فعال می‌شود") }
+                else -> b.setOnClickListener { toast("این ابزار هنوز در نسخه اولیه فعال نشده است") }
+            }
         }
 
         val workRow = horizontal(page, 155).apply { gravity = Gravity.CENTER }
@@ -130,48 +143,69 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(dp(58), -1)
         }
         workRow.addView(left)
-        listOf("UnDo", "ReDo", "Cancel").forEach {
-            left.addView(button(it, 17f, Color.GRAY, Color.rgb(20, 29, 44)).apply {
-                alpha = 0.55f
-                isEnabled = false
-                layoutParams = LinearLayout.LayoutParams(-1, 0, 1f).apply {
-                    setMargins(dp(1), dp(1), dp(1), dp(1))
-                }
-            })
-        }
+        undoControl = button("UnDo", 17f)
+        redoControl = button("ReDo", 17f)
+        left.addView(undoControl, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            setMargins(dp(1), dp(1), dp(1), dp(1))
+        })
+        left.addView(redoControl, LinearLayout.LayoutParams(-1, 0, 1f).apply {
+            setMargins(dp(1), dp(1), dp(1), dp(1))
+        })
+        left.addView(button("Cancel", 16f, Color.LTGRAY, Color.rgb(20, 29, 44)).apply {
+            setOnClickListener {
+                if (video.isPlaying) video.pause()
+                playControl?.text = "Play\n⏯"
+            }
+            layoutParams = LinearLayout.LayoutParams(-1, 0, 1f).apply {
+                setMargins(dp(1), dp(1), dp(1), dp(1))
+            }
+        })
+        undoControl?.setOnClickListener { undo() }
+        redoControl?.setOnClickListener { redo() }
 
         val playColumn = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(dp(55), -1)
         }
         workRow.addView(playColumn)
-        listOf("Play\n⏯", "⏩\nForward", "⏪\nBack", "Speed\nPlay").forEach { label ->
-            val isPlay = label.startsWith("Play")
-            val b = button(
-                label, 13f,
-                if (isPlay) white else Color.GRAY,
-                if (isPlay) panel else Color.rgb(20, 29, 44)
-            )
-            b.alpha = if (isPlay) 1f else 0.45f
-            b.isEnabled = isPlay
-            b.layoutParams = LinearLayout.LayoutParams(-1, 0, 1f).apply {
+        val play = button("Play\n⏯", 13f)
+        playControl = play
+        playColumn.addView(play, LinearLayout.LayoutParams(-1, 0, 1f))
+        play.setOnClickListener {
+            if (!videoReady) toast("ابتدا ویدیو وارد کنید")
+            else if (video.isPlaying) {
+                video.pause()
+                play.text = "Play\n⏯"
+                preview.visibility = View.VISIBLE
+            } else {
+                video.start()
+                preview.visibility = View.GONE
+                play.text = "Pause\n⏸"
+            }
+        }
+        val forward = button("⏩\nForward", 12f)
+        val back = button("⏪\nBack", 12f)
+        val speed = button("Speed\n1×", 12f)
+        listOf(forward, back, speed).forEach {
+            playColumn.addView(it, LinearLayout.LayoutParams(-1, 0, 1f).apply {
                 setMargins(dp(1), dp(1), dp(1), dp(1))
+            })
+        }
+        forward.setOnClickListener {
+            if (videos.size > 1) switchVideo(1)
+            else if (videoReady) video.seekTo((video.currentPosition + 10000).coerceAtMost(videoDurationMs.toInt()))
+        }
+        back.setOnClickListener {
+            if (videos.size > 1) switchVideo(-1)
+            else if (videoReady) video.seekTo((video.currentPosition - 10000).coerceAtLeast(0))
+        }
+        speed.setOnClickListener {
+            playbackSpeed = when (playbackSpeed) { 1f -> 1.25f; 1.25f -> 1.5f; 1.5f -> 2f; else -> 1f }
+            if (android.os.Build.VERSION.SDK_INT >= 23) {
+                try { mediaPlayer?.playbackParams = mediaPlayer?.playbackParams?.setSpeed(playbackSpeed)!! }
+                catch (_: Exception) {}
             }
-            playColumn.addView(b)
-            if (isPlay) {
-                playControl = b
-                b.setOnClickListener {
-                    if (!videoReady) {
-                        Toast.makeText(this, "ابتدا یک ویدیو وارد کنید", Toast.LENGTH_SHORT).show()
-                    } else if (video.isPlaying) {
-                        video.pause()
-                        b.text = "Play\n⏯"
-                    } else {
-                        video.start()
-                        b.text = "Pause\n⏸"
-                    }
-                }
-            }
+            speed.text = "Speed\n${playbackSpeed}×"
         }
 
         val playerFrame = FrameLayout(this).apply {
@@ -183,15 +217,27 @@ class MainActivity : Activity() {
             layoutParams = FrameLayout.LayoutParams(-1, -1)
         }
         playerFrame.addView(video)
+        preview = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setBackgroundColor(Color.BLACK)
+            layoutParams = FrameLayout.LayoutParams(-1, -1)
+        }
+        playerFrame.addView(preview)
+        brightnessShade = View(this).apply {
+            setBackgroundColor(Color.BLACK)
+            alpha = 0f
+            layoutParams = FrameLayout.LayoutParams(-1, -1)
+        }
+        playerFrame.addView(brightnessShade)
         playerHint = TextView(this).apply {
             text = "Player\nImport Videos"
-            textSize = 24f
-            setTextColor(Color.rgb(255, 65, 75))
+            textSize = 20f
+            setTextColor(Color.LTGRAY)
             gravity = Gravity.CENTER
-            rotation = -12f
             isClickable = false
         }
         playerFrame.addView(playerHint, FrameLayout.LayoutParams(-1, -1))
+        installPlayerGestures(playerFrame)
         workRow.addView(playerFrame)
 
         val right = LinearLayout(this).apply {
@@ -199,57 +245,78 @@ class MainActivity : Activity() {
             layoutParams = LinearLayout.LayoutParams(dp(58), -1)
         }
         workRow.addView(right)
-        right.addView(button("Crop", 23f, Color.GRAY, Color.rgb(20, 29, 44)).apply {
-            alpha = 0.45f
-            isEnabled = false
+        right.addView(button("Crop", 21f).apply {
+            setOnClickListener { toast("برش در مرحله بعد فعال می‌شود") }
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
         })
-        right.addView(button("Cover\nFrame 🖼", 14f, Color.GRAY, Color.rgb(20, 29, 44)).apply {
-            alpha = 0.45f
-            isEnabled = false
+        right.addView(button("Cover\nFrame 🖼", 13f).apply {
+            setOnClickListener {
+                val bmp = frameBitmaps[1]
+                if (bmp != null) { preview.setImageBitmap(bmp); preview.visibility = View.VISIBLE }
+                else toast("هنوز فریمی استخراج نشده است")
+            }
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
         })
 
-        val transport = horizontal(page, 32)
+        val transport = horizontal(page, 38)
         val info = TextView(this).apply {
-            text = "UP     ALL VIEW      Time Lines   00:05"
-            textSize = 15f
+            text = "UP   VIDEOS 0/0"
+            textSize = 13f
             setTextColor(white)
             gravity = Gravity.CENTER
             background = bg(navy)
             layoutParams = LinearLayout.LayoutParams(0, -1, 1f)
+            setOnClickListener { if (videos.isNotEmpty()) switchVideo(1) }
         }
         transport.addView(info)
-
-        var selectAllButton: TextView? = null
-        var unselectButton: TextView? = null
-        listOf("Select All", "Un Select", "Search\nBy Photo").forEachIndexed { index, label ->
-            val b = button(
-                label, 13f,
-                if (index == 2) Color.rgb(135, 95, 65) else Color.DKGRAY,
-                if (index == 2) Color.rgb(255, 225, 175) else yellow
-            )
-            b.layoutParams = LinearLayout.LayoutParams(
-                dp(if (index == 2) 86 else 82), -1
-            ).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }
-            transport.addView(b)
-            if (index == 0) selectAllButton = b
-            if (index == 1) unselectButton = b
-            if (index == 2) {
-                b.alpha = 0.45f
-                b.isEnabled = false
+        val colsLabel = TextView(this).apply {
+            text = "Columns"
+            textSize = 11f
+            setTextColor(yellow)
+            gravity = Gravity.CENTER
+        }
+        transport.addView(colsLabel, LinearLayout.LayoutParams(dp(52), -1))
+        columnSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                (1..15).map { "$it" })
+            setSelection(4)
+            layoutParams = LinearLayout.LayoutParams(dp(48), -1)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    columnCount = position + 1
+                    storyboardGrid?.columnCount = columnCount
+                }
             }
+        }
+        transport.addView(columnSpinner)
+        val selectAll = button("Select All", 12f, Color.DKGRAY, yellow)
+        val unselect = button("Un Select", 12f, Color.DKGRAY, yellow)
+        listOf(selectAll, unselect).forEach {
+            it.layoutParams = LinearLayout.LayoutParams(dp(78), -1).apply {
+                setMargins(dp(2), dp(1), dp(2), dp(1))
+            }
+            transport.addView(it)
+        }
+        selectAll.setOnClickListener {
+            saveUndo()
+            selectedFrames.clear(); selectedFrames.addAll(frameIds); rangeAnchor = null
+            refreshSelection()
+        }
+        unselect.setOnClickListener {
+            saveUndo()
+            selectedFrames.clear(); rangeAnchor = null
+            refreshSelection()
         }
 
         storyboardTitle = TextView(this).apply {
-            text = "STORYBOARD  •  120 FRAMES  •  Waiting for video"
+            text = "STORYBOARD • 120 FRAMES • Waiting for video"
             textSize = 12f
             setTextColor(Color.LTGRAY)
             setPadding(dp(7), dp(3), dp(7), dp(3))
             background = bg(navy)
         }
         page.addView(storyboardTitle)
-
         val scroll = ScrollView(this).apply {
             isFillViewport = false
             isVerticalScrollBarEnabled = true
@@ -257,74 +324,220 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.rgb(4, 14, 36))
         }
         storyboardGrid = GridLayout(this).apply {
-            columnCount = 5
+            columnCount = columnCount
             useDefaultMargins = false
             setPadding(dp(2), dp(2), dp(2), dp(2))
         }
         scroll.addView(storyboardGrid)
         page.addView(scroll)
+        renderStoryboard()
+        updateHistoryButtons()
+    }
 
-        selectAllButton?.setOnClickListener {
-            selectedFrames.clear()
-            selectedFrames.addAll(frameIds)
-            rangeAnchor = null
-            refreshSelection()
-        }
-        unselectButton?.setOnClickListener {
-            selectedFrames.clear()
-            rangeAnchor = null
-            refreshSelection()
-        }
-        deleteButton?.setOnClickListener {
-            if (selectedFrames.isNotEmpty()) {
-                val deleted = selectedFrames.toList()
-                frameIds.removeAll(selectedFrames)
-                selectedFrames.clear()
-                rangeAnchor = null
-                deleted.forEach { id ->
-                    frameImageViews[id]?.setImageDrawable(null)
-                    frameBitmaps.remove(id)?.let { bitmap ->
-                        if (!bitmap.isRecycled) bitmap.recycle()
+    private fun installPlayerGestures(frame: FrameLayout) {
+        var startY = 0f
+        var startValue = 0f
+        var mode = 0
+        fun attach(area: View, type: Int) {
+            area.setOnTouchListener { v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> {
+                        startY = event.rawY
+                        mode = type
+                        startValue = if (type == 1) playerBrightness else playerVolume
+                        true
                     }
-                    frameImageViews.remove(id)
-                    frameTiles.remove(id)
+                    MotionEvent.ACTION_MOVE -> {
+                        val delta = (startY - event.rawY) / dp(180).toFloat()
+                        val value = (startValue + delta).coerceIn(0f, 1f)
+                        if (mode == 1) {
+                            playerBrightness = value
+                            brightnessShade.alpha = (1f - value) * 0.78f
+                        } else {
+                            playerVolume = value
+                            mediaPlayer?.setVolume(value, value)
+                        }
+                        playerHint?.text = if (mode == 1) "Light ${(playerBrightness * 100).toInt()}%" else "Sound ${(playerVolume * 100).toInt()}%"
+                        playerHint?.visibility = View.VISIBLE
+                        true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        playerHint?.visibility = if (videoReady && !video.isPlaying) View.GONE else View.GONE
+                        true
+                    }
+                    else -> true
                 }
-                renderStoryboard()
-            } else {
-                Toast.makeText(this, "ابتدا اسلایدها را انتخاب کنید", Toast.LENGTH_SHORT).show()
             }
         }
+        val leftArea = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(0, -1, Gravity.START)
+        }
+        val rightArea = View(this).apply {
+            layoutParams = FrameLayout.LayoutParams(0, -1, Gravity.END)
+        }
+        // Split touch surfaces into left/light and right/sound halves.
+        frame.post {
+            val half = frame.width / 2
+            leftArea.layoutParams = FrameLayout.LayoutParams(half, -1, Gravity.START)
+            rightArea.layoutParams = FrameLayout.LayoutParams(frame.width - half, -1, Gravity.END)
+        }
+        attach(leftArea, 1)
+        attach(rightArea, 2)
+        frame.addView(leftArea)
+        frame.addView(rightArea)
+    }
 
+    private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+    private fun chooseVideos() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "video/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+        startActivityForResult(intent, requestVideo)
+    }
+
+    @Deprecated("Legacy callback retained for compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != requestVideo || resultCode != RESULT_OK || data == null) return
+        val chosen = mutableListOf<Uri>()
+        data.data?.let { chosen.add(it) }
+        data.clipData?.let { clip ->
+            chosen.clear()
+            for (i in 0 until clip.itemCount) chosen.add(clip.getItemAt(i).uri)
+        }
+        if (chosen.isEmpty()) return
+        chosen.forEach { uri ->
+            try { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            catch (_: SecurityException) {}
+            if (!videos.contains(uri)) videos.add(uri)
+        }
+        currentVideoIndex = videos.indexOf(chosen.first()).coerceAtLeast(0)
+        loadVideo(videos[currentVideoIndex])
+        toast("${videos.size} ویدیو در فهرست قرار گرفت")
+    }
+
+    private fun switchVideo(delta: Int) {
+        if (videos.isEmpty()) return
+        currentVideoIndex = (currentVideoIndex + delta + videos.size) % videos.size
+        loadVideo(videos[currentVideoIndex])
+    }
+
+    private fun loadVideo(uri: Uri) {
+        extractionGeneration++
+        val generation = extractionGeneration
+        frameBitmaps.values.forEach { if (!it.isRecycled) it.recycle() }
+        frameBitmaps.clear()
+        selectedFrames.clear()
+        frameIds.clear(); frameIds.addAll(1..storyboardFrameCount)
+        rangeAnchor = null
+        extractionDone = 0
+        videoDurationMs = 0L
+        videoReady = false
+        mediaPlayer = null
+        playControl?.text = "Play\n⏯"
+        video.stopPlayback()
+        preview.setImageDrawable(null)
+        preview.visibility = View.VISIBLE
+        playerHint?.text = "Loading video..."
+        playerHint?.visibility = View.VISIBLE
+        renderStoryboard()
+        storyboardTitle?.text = "Preparing video • ${currentVideoIndex + 1}/${videos.size}"
+        video.setOnPreparedListener { mp ->
+            if (generation != extractionGeneration) return@setOnPreparedListener
+            mediaPlayer = mp
+            mp.isLooping = false
+            mp.setVolume(playerVolume, playerVolume)
+            videoReady = true
+            videoDurationMs = mp.duration.toLong().coerceAtLeast(1L)
+            playControl?.text = "Play\n⏯"
+            mp.setOnVideoSizeChangedListener { _, _, _ ->
+                if (!video.isPlaying) video.pause()
+            }
+            mp.setOnCompletionListener { playControl?.text = "Play\n⏯" }
+            playerHint?.visibility = View.GONE
+            startTwoFrameProcessors(uri, videoDurationMs, generation)
+        }
+        video.setOnErrorListener { _, what, extra ->
+            if (generation == extractionGeneration) {
+                videoReady = false
+                playerHint?.text = "Cannot play this video ($what/$extra)"
+                playerHint?.visibility = View.VISIBLE
+            }
+            true
+        }
+        video.setVideoURI(uri)
+    }
+
+    private fun saveUndo() {
+        undoStack.addLast(EditState(frameIds.toList(), selectedFrames.toSet(), rangeAnchor))
+        if (undoStack.size > 50) undoStack.removeFirst()
+        redoStack.clear()
+        updateHistoryButtons()
+    }
+
+    private fun applyState(state: EditState) {
+        frameIds.clear(); frameIds.addAll(state.ids)
+        selectedFrames.clear(); selectedFrames.addAll(state.selected)
+        rangeAnchor = state.anchor
+        renderStoryboard()
+    }
+
+    private fun undo() {
+        if (undoStack.isEmpty()) return
+        redoStack.addLast(EditState(frameIds.toList(), selectedFrames.toSet(), rangeAnchor))
+        applyState(undoStack.removeLast())
+        updateHistoryButtons()
+    }
+
+    private fun redo() {
+        if (redoStack.isEmpty()) return
+        undoStack.addLast(EditState(frameIds.toList(), selectedFrames.toSet(), rangeAnchor))
+        applyState(redoStack.removeLast())
+        updateHistoryButtons()
+    }
+
+    private fun updateHistoryButtons() {
+        undoControl?.alpha = if (undoStack.isEmpty()) 0.45f else 1f
+        redoControl?.alpha = if (redoStack.isEmpty()) 0.45f else 1f
+        undoControl?.isEnabled = undoStack.isNotEmpty()
+        redoControl?.isEnabled = redoStack.isNotEmpty()
+    }
+
+    private fun deleteSelectedFrames() {
+        if (selectedFrames.isEmpty()) { toast("ابتدا اسلایدها را انتخاب کنید"); return }
+        saveUndo()
+        val deleted = selectedFrames.toSet()
+        frameIds.removeAll(deleted)
+        selectedFrames.clear()
+        rangeAnchor = null
         renderStoryboard()
     }
 
     private fun refreshSelection() {
-        frameTiles.forEach { (frameId, tile) ->
-            val selected = frameId in selectedFrames
+        frameTiles.forEach { (id, tile) ->
+            val selected = id in selectedFrames
             tile.foreground = GradientDrawable().apply {
                 setColor(Color.TRANSPARENT)
                 setStroke(dp(if (selected) 3 else 1), if (selected) yellow else Color.rgb(55, 70, 112))
             }
         }
-        val extracted = frameBitmaps.size
-        storyboardTitle?.text = buildString {
-            append("STORYBOARD  •  ${frameIds.size} FRAMES  •  Selected: ${selectedFrames.size}")
-            append("  •  Images: $extracted/$storyboardFrameCount")
-            if (rangeAnchor != null) append("  •  Start: ${rangeAnchor!!.toString().padStart(3, '0')} (hold second)")
-        }
+        storyboardTitle?.text =
+            "STORYBOARD • ${frameIds.size} FRAMES • Selected: ${selectedFrames.size} • Images: ${frameBitmaps.size}/$storyboardFrameCount • ${videos.size} videos"
     }
 
     private fun renderStoryboard() {
         val grid = storyboardGrid ?: return
         grid.removeAllViews()
-        frameTiles.clear()
-        frameImageViews.clear()
-
+        frameTiles.clear(); frameImageViews.clear()
+        grid.columnCount = columnCount
         frameIds.forEach { frameId ->
             val tile = FrameLayout(this).apply {
                 background = bg(Color.rgb(15, 25, 55))
-                isClickable = true
-                isLongClickable = true
+                isClickable = true; isLongClickable = true
             }
             val image = ImageView(this).apply {
                 scaleType = ImageView.ScaleType.CENTER_CROP
@@ -333,55 +546,34 @@ class MainActivity : Activity() {
                 layoutParams = FrameLayout.LayoutParams(-1, -1)
             }
             tile.addView(image)
-
-            val number = TextView(this).apply {
+            tile.addView(TextView(this).apply {
                 text = String.format("%03d", frameId)
-                textSize = 10f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                setPadding(dp(3), dp(1), dp(3), dp(1))
-                setBackgroundColor(0x99000000.toInt())
-                layoutParams = FrameLayout.LayoutParams(
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    FrameLayout.LayoutParams.WRAP_CONTENT,
-                    Gravity.BOTTOM or Gravity.START
-                )
-            }
-            tile.addView(number)
-
+                textSize = 10f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+                setPadding(dp(3), dp(1), dp(3), dp(1)); setBackgroundColor(0x99000000.toInt())
+                layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START)
+            })
             tile.setOnClickListener {
-                // First tap sets the endpoint and toggles its selection state.
+                saveUndo()
                 rangeAnchor = frameId
                 if (!selectedFrames.add(frameId)) selectedFrames.remove(frameId)
                 refreshSelection()
             }
             tile.setOnLongClickListener {
-                val anchor = rangeAnchor
-                if (anchor == null) {
-                    Toast.makeText(this, "ابتدا اسلاید اول را لمس کنید", Toast.LENGTH_SHORT).show()
-                    false
-                } else {
-                    val firstIndex = frameIds.indexOf(anchor)
-                    val secondIndex = frameIds.indexOf(frameId)
-                    if (firstIndex >= 0 && secondIndex >= 0) {
-                        // The first endpoint's post-tap state chooses select or deselect.
-                        val selectRange = anchor in selectedFrames
-                        val low = min(firstIndex, secondIndex)
-                        val high = max(firstIndex, secondIndex)
-                        for (index in low..high) {
-                            val id = frameIds[index]
-                            if (selectRange) selectedFrames.add(id) else selectedFrames.remove(id)
-                        }
+                val anchor = rangeAnchor ?: return@setOnLongClickListener false
+                val a = frameIds.indexOf(anchor); val b = frameIds.indexOf(frameId)
+                if (a >= 0 && b >= 0) {
+                    saveUndo()
+                    val select = anchor in selectedFrames
+                    for (i in min(a, b)..max(a, b)) {
+                        if (select) selectedFrames.add(frameIds[i]) else selectedFrames.remove(frameIds[i])
                     }
-                    rangeAnchor = null
-                    refreshSelection()
-                    true
                 }
+                rangeAnchor = null
+                refreshSelection()
+                true
             }
-
             val params = GridLayout.LayoutParams().apply {
-                width = 0
-                height = dp(76)
+                width = 0; height = dp(76)
                 columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
                 setMargins(dp(1), dp(1), dp(1), dp(1))
             }
@@ -393,164 +585,58 @@ class MainActivity : Activity() {
         refreshSelection()
     }
 
-    private fun chooseVideo() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "video/*"
-        }
-        startActivityForResult(intent, requestVideo)
-    }
-
-    @Deprecated("Legacy callback retained for compatibility with the starter project")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == requestVideo && resultCode == RESULT_OK) {
-            data?.data?.let { uri -> loadVideo(uri) }
-        }
-    }
-
-    private fun loadVideo(uri: Uri) {
-        try {
-            contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        } catch (_: SecurityException) {
-            // Some document providers do not grant persistable permissions.
-        }
-
-        extractionGeneration++
-        val generation = extractionGeneration
-        frameBitmaps.values.forEach { if (!it.isRecycled) it.recycle() }
-        frameBitmaps.clear()
-        selectedFrames.clear()
-        frameIds.clear()
-        frameIds.addAll(1..storyboardFrameCount)
-        rangeAnchor = null
-        extractionDone = 0
-        videoDurationMs = 0L
-        videoReady = false
-        playControl?.text = "Play\n⏯"
-        video.stopPlayback()
-        renderStoryboard()
-        storyboardTitle?.text = "STORYBOARD  •  Preparing video and two frame processors..."
-        playerHint?.visibility = View.VISIBLE
-
-        video.setOnPreparedListener { mediaPlayer ->
-            if (generation != extractionGeneration) return@setOnPreparedListener
-            mediaPlayer.isLooping = false
-            videoReady = true
-            videoDurationMs = mediaPlayer.duration.toLong().coerceAtLeast(1L)
-            playControl?.text = "Play\n⏯"
-            mediaPlayer.setOnCompletionListener { playControl?.text = "Play\n⏯" }
-            playerHint?.visibility = View.GONE
-            startTwoFrameProcessors(uri, videoDurationMs, generation)
-        }
-        video.setOnErrorListener { _, what, extra ->
-            if (generation == extractionGeneration) {
-                videoReady = false
-                playerHint?.visibility = View.VISIBLE
-                storyboardTitle?.text = "Video load error ($what / $extra)"
-            }
-            true
-        }
-        video.setVideoURI(uri)
-    }
-
-    /** Two independent retrievers process the first and second halves concurrently. */
     private fun startTwoFrameProcessors(uri: Uri, durationMs: Long, generation: Int) {
-        extractionDone = 0
-        processorProgress[0] = 0
-        processorProgress[1] = 0
-        refreshSelection()
-        storyboardTitle?.text = "STORYBOARD  •  P1: 001–060  |  P2: 061–120  •  Starting..."
-
+        extractionDone = 0; processorProgress[0] = 0; processorProgress[1] = 0
         val midpoint = storyboardFrameCount / 2
-        val firstProcessor = Thread {
-            extractFrameRange(uri, durationMs, 0, midpoint, generation, 0)
-        }.apply { name = "Storyboard-Frame-Processor-1" }
-        val secondProcessor = Thread {
-            extractFrameRange(uri, durationMs, midpoint, storyboardFrameCount, generation, 1)
-        }.apply { name = "Storyboard-Frame-Processor-2" }
-
-        firstProcessor.start()
-        secondProcessor.start()
+        Thread({ extractFrameRange(uri, durationMs, 0, midpoint, generation, 0) }, "EWVE-Frame-1").start()
+        Thread({ extractFrameRange(uri, durationMs, midpoint, storyboardFrameCount, generation, 1) }, "EWVE-Frame-2").start()
     }
 
-    private fun extractFrameRange(
-        uri: Uri,
-        durationMs: Long,
-        startIndex: Int,
-        endIndexExclusive: Int,
-        generation: Int,
-        processorIndex: Int
-    ) {
+    private fun extractFrameRange(uri: Uri, durationMs: Long, start: Int, end: Int,
+                                  generation: Int, processor: Int) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(this, uri)
-            for (index in startIndex until endIndexExclusive) {
+            for (index in start until end) {
                 if (generation != extractionGeneration) break
-                val timeUs = if (storyboardFrameCount <= 1) 0L else
-                    (durationMs * 1000L * index) / (storyboardFrameCount - 1)
-                val original = retriever.getFrameAtTime(
-                    timeUs, MediaMetadataRetriever.OPTION_CLOSEST
-                )
-                val thumbnail = original?.let { makeThumbnail(it) }
-                if (original != null && thumbnail !== original && !original.isRecycled) original.recycle()
-
+                val timeUs = durationMs * 1000L * index / (storyboardFrameCount - 1)
+                val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                val thumb = frame?.let { makeThumbnail(it) }
+                if (frame != null && thumb !== frame && !frame.isRecycled) frame.recycle()
                 runOnUiThread {
-                    if (generation == extractionGeneration) {
-                        if (thumbnail != null) {
-                            val frameId = index + 1
-                            if (frameId in frameIds) {
-                                frameBitmaps.put(frameId, thumbnail)?.let { old ->
-                                    if (old !== thumbnail && !old.isRecycled) old.recycle()
-                                }
-                                frameImageViews[frameId]?.setImageBitmap(thumbnail)
-                            } else if (!thumbnail.isRecycled) {
-                                thumbnail.recycle()
-                            }
-                        }
-                        extractionDone++
-                        processorProgress[processorIndex]++
-                        updateExtractionStatus()
-                    } else if (thumbnail != null && !thumbnail.isRecycled) {
-                        thumbnail.recycle()
+                    if (generation != extractionGeneration) {
+                        if (thumb != null && !thumb.isRecycled) thumb.recycle()
+                        return@runOnUiThread
                     }
+                    if (thumb != null) {
+                        val id = index + 1
+                        frameBitmaps.put(id, thumb)?.let { old ->
+                            if (old !== thumb && !old.isRecycled) old.recycle()
+                        }
+                        frameImageViews[id]?.setImageBitmap(thumb)
+                        if (id == 1 && !video.isPlaying) {
+                            preview.setImageBitmap(thumb)
+                            preview.visibility = View.VISIBLE
+                        }
+                    }
+                    extractionDone++; processorProgress[processor]++
+                    storyboardTitle?.text =
+                        "Frames ${frameBitmaps.size}/120 • P1 ${processorProgress[0]}/60 • P2 ${processorProgress[1]}/60"
                 }
             }
-        } catch (error: Exception) {
-            runOnUiThread {
-                if (generation == extractionGeneration) {
-                    storyboardTitle?.text = "Frame extraction issue (processor ${processorIndex + 1}): ${error.message ?: "unknown"}"
-                }
-            }
+        } catch (e: Exception) {
+            runOnUiThread { if (generation == extractionGeneration) storyboardTitle?.text = "Frame extraction: ${e.message}" }
         } finally {
-            try {
-                retriever.release()
-            } catch (_: Exception) {
-            }
+            try { retriever.release() } catch (_: Exception) {}
         }
     }
 
     private fun makeThumbnail(source: Bitmap): Bitmap {
-        // Keep thumbnails small to avoid excessive memory use on Android devices.
-        val maxWidth = 240
-        val maxHeight = 150
-        val scale = min(
-            1f,
-            min(maxWidth.toFloat() / source.width, maxHeight.toFloat() / source.height)
-        )
+        val maxWidth = 240; val maxHeight = 150
+        val scale = min(1f, min(maxWidth.toFloat() / source.width, maxHeight.toFloat() / source.height))
         if (scale >= 0.999f) return source
-        val width = (source.width * scale).toInt().coerceAtLeast(1)
-        val height = (source.height * scale).toInt().coerceAtLeast(1)
-        return Bitmap.createScaledBitmap(source, width, height, true)
-    }
-
-    private fun updateExtractionStatus() {
-        val count = frameBitmaps.size
-        val p1 = processorProgress[0]
-        val p2 = processorProgress[1]
-        val state = if (extractionDone >= storyboardFrameCount) "Complete" else "Running"
-        storyboardTitle?.text =
-            "STORYBOARD • Images: $count/$storyboardFrameCount • P1: $p1/60 • P2: $p2/60 • $state"
+        return Bitmap.createScaledBitmap(source, (source.width * scale).toInt().coerceAtLeast(1),
+            (source.height * scale).toInt().coerceAtLeast(1), true)
     }
 
     override fun onDestroy() {

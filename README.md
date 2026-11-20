@@ -1,25 +1,16 @@
-# EWVE
+# EWVE — first-stage Android video editor
 
-Independent first-stage Android video-editor project.
-
-## Included in this initial version
-- Native Android / Kotlin project, named **EWVE**.
-- Portrait editor layout with the top tool strip, central video player, side controls,
-  transport strip, and vertically scrolling five-column storyboard.
-- **Import Videos** opens Android's document picker and loads the chosen video in the player.
-- The imported video does not autoplay; playback starts only when **Play** is pressed.
-- Two concurrent frame processors extract up to 120 real thumbnails from the selected video:
-  processor 1 handles frames 1–60 and processor 2 handles frames 61–120.
-- The video itself is not inserted as a storyboard tile.
-- Storyboard supports tap-first / long-press-second inclusive range selection or deselection,
-  Select All, Un Select, and Delete selected storyboard frames.
-- Deleting storyboard frames only removes storyboard entries; it does not modify the source video.
-- Other editor tools remain disabled or are placeholders in this first milestone.
-
-## Build
-Open in Android Studio with JDK 17 and Android SDK 35, or push to GitHub and run
-the included GitHub Actions workflow.
-
-- Application ID: `com.ewve`
-- Minimum Android version: API 23
-- Version: 1.0
+- Application ID: `com.ewve`; Java 17; Android SDK 35; minSdk 23.
+- Toolbar order follows the supplied reference: Import Videos, Export Video, Delete,
+  Tracks, Color And Light, Blur Sharpen Noise, Merge Join, Video Text.
+- Multi-select video import through Android's document picker (`video/*`), including
+  common video formats supported by the device. The first selected video loads in the player.
+- Player preview image from the first extracted frame; playback starts only with Play.
+- Drag vertically on the left half of the player to adjust player-only brightness overlay;
+  drag vertically on the right half to adjust player volume.
+- Play/Pause, seek forward/back 10 seconds, and playback speed presets.
+- Storyboard has 120 extracted frames and a 1–15 column selector (default 5).
+- Tap an endpoint, then long-press the second endpoint for inclusive range selection/deselection.
+- Select All, Un Select, Delete selected storyboard frames, Undo and Redo (up to 50 history states).
+- The imported source video is not inserted as a storyboard tile.
+- Export, tracks, crop, color grading, blur/sharpen/noise, merge, and text remain future tools.
