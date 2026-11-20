@@ -110,23 +110,24 @@ class MainActivity : Activity() {
         }
         setContentView(page)
 
-        // Top toolbar follows the supplied reference image from left to right.
-        val topScroll = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
+        // Fixed-width toolbar: all eight controls remain visible without horizontal scrolling.
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
             layoutParams = LinearLayout.LayoutParams(-1, dp(58))
         }
-        val topRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        topScroll.addView(topRow)
-        page.addView(topScroll)
+        page.addView(topRow)
         val topItems = listOf(
             "Import\nVideos", "Export\nVideo", "Delete", "Tracks",
             "Color\nAnd Light", "Blur\nSharpen\nNoise", "Merge\nJoin", "Video\nText"
         )
         topItems.forEachIndexed { index, title ->
-            val b = button(title, 14f,
+            val b = button(title, 10.5f,
                 if (index == 2) Color.rgb(255, 90, 100) else white, navy)
-            b.layoutParams = LinearLayout.LayoutParams(
-                dp(if (index == 4 || index == 5) 105 else 92), dp(58))
+            b.setPadding(dp(1), dp(2), dp(1), dp(2))
+            b.layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply {
+                setMargins(dp(1), dp(1), dp(1), dp(1))
+            }
             topRow.addView(b)
             when (index) {
                 0 -> b.setOnClickListener { chooseVideos() }
