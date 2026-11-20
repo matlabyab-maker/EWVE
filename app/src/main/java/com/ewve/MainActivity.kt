@@ -10,10 +10,12 @@ import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
+import android.os.Build
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.*
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -54,6 +56,7 @@ class MainActivity : Activity() {
     private var playerVolume = 1f
     private var playerBrightness = 1f
     private var columnCount = 5
+    private var videoAspectRatio = 16f / 9f
 
     private data class EditState(
         val ids: List<Int>,
@@ -155,6 +158,9 @@ class MainActivity : Activity() {
         left.addView(button("Cancel", 16f, Color.LTGRAY, Color.rgb(20, 29, 44)).apply {
             setOnClickListener {
                 if (video.isPlaying) video.pause()
+                video.visibility = View.VISIBLE
+                preview.visibility = View.VISIBLE
+                if (videos.isNotEmpty()) showPreviewAt(video.currentPosition.toLong(), videos[currentVideoIndex])
                 playControl?.text = "Play\n⏯"
             }
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f).apply {
@@ -176,11 +182,14 @@ class MainActivity : Activity() {
             if (!videoReady) toast("ابتدا ویدیو وارد کنید")
             else if (video.isPlaying) {
                 video.pause()
-                play.text = "Play\n⏯"
+                video.visibility = View.VISIBLE
                 preview.visibility = View.VISIBLE
+                showPreviewAt(video.currentPosition.toLong(), videos[currentVideoIndex])
+                play.text = "Play\n⏯"
             } else {
-                video.start()
                 preview.visibility = View.GONE
+                video.visibility = View.VISIBLE
+                video.start()
                 play.text = "Pause\n⏸"
             }
         }
@@ -215,6 +224,7 @@ class MainActivity : Activity() {
         }
         video = VideoView(this).apply {
             setBackgroundColor(Color.BLACK)
+            visibility = View.VISIBLE
             layoutParams = FrameLayout.LayoutParams(-1, -1)
         }
         playerFrame.addView(video)
@@ -279,14 +289,14 @@ class MainActivity : Activity() {
         transport.addView(colsLabel, LinearLayout.LayoutParams(dp(52), -1))
         columnSpinner = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
-                (1..15).map { "$it" })
-            setSelection(4)
+                (5..15).map { "$it" })
+            setSelection(0)
             layoutParams = LinearLayout.LayoutParams(dp(48), -1)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onNothingSelected(parent: AdapterView<*>?) {}
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    columnCount = position + 1
-                    storyboardGrid?.columnCount = columnCount
+                    columnCount = position + 5
+                    renderStoryboard()
                 }
             }
         }
@@ -438,11 +448,14 @@ class MainActivity : Activity() {
         extractionDone = 0
         videoDurationMs = 0L
         videoReady = false
+        videoAspectRatio = readDisplayAspectRatio(uri)
+        video.visibility = View.VISIBLE
         mediaPlayer = null
         playControl?.text = "Play\n⏯"
         video.stopPlayback()
         preview.setImageDrawable(null)
         preview.visibility = View.VISIBLE
+        showPreviewAt(0L, uri, generation)
         playerHint?.text = "Loading video..."
         playerHint?.visibility = View.VISIBLE
         renderStoryboard()
@@ -455,7 +468,20 @@ class MainActivity : Activity() {
             videoReady = true
             videoDurationMs = mp.duration.toLong().coerceAtLeast(1L)
             playControl?.text = "Play\n⏯"
-            mp.setOnVideoSizeChangedListener { _, _, _ ->
+            mp.setOnVideoSizeChangedListener { _, width, height ->
+                if (width > 0 && height > 0) {
+                    val playerRatio = width.toFloat() / height.toFloat()
+                    if (playerRatio in 0.2f..5f) {
+                        videoAspectRatio = if (abs(playerRatio - videoAspectRatio) < 0.08f) {
+                            playerRatio
+                        } else if (abs((1f / playerRatio) - videoAspectRatio) < 0.08f) {
+                            1f / playerRatio
+                        } else {
+                            videoAspectRatio
+                        }
+                    }
+                    renderStoryboard()
+                }
                 if (!video.isPlaying) video.pause()
             }
             mp.setOnCompletionListener { playControl?.text = "Play\n⏯" }
@@ -471,6 +497,46 @@ class MainActivity : Activity() {
             true
         }
         video.setVideoURI(uri)
+    }
+
+    private fun readDisplayAspectRatio(uri: Uri): Float {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(this, uri)
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toFloatOrNull() ?: 16f
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toFloatOrNull() ?: 9f
+            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            val rotated = rotation == 90 || rotation == 270
+            val displayWidth = if (rotated) height else width
+            val displayHeight = if (rotated) width else height
+            (displayWidth / displayHeight.coerceAtLeast(1f)).coerceIn(0.2f, 5f)
+        } catch (_: Exception) {
+            16f / 9f
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun showPreviewAt(positionMs: Long, uri: Uri, expectedGeneration: Int = extractionGeneration) {
+        Thread({
+            val retriever = MediaMetadataRetriever()
+            var bitmap: Bitmap? = null
+            try {
+                retriever.setDataSource(this, uri)
+                bitmap = retriever.getFrameAtTime(positionMs.coerceAtLeast(0L) * 1000L,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } catch (_: Exception) {
+            } finally {
+                try { retriever.release() } catch (_: Exception) {}
+            }
+            runOnUiThread {
+                if (expectedGeneration != extractionGeneration) {
+                    bitmap?.takeIf { !it.isRecycled }?.recycle()
+                    return@runOnUiThread
+                }
+                bitmap?.let { if (!it.isRecycled) preview.setImageBitmap(it) }
+            }
+        }, "EWVE-Player-Preview").start()
     }
 
     private fun saveUndo() {
@@ -541,7 +607,7 @@ class MainActivity : Activity() {
                 isClickable = true; isLongClickable = true
             }
             val image = ImageView(this).apply {
-                scaleType = ImageView.ScaleType.CENTER_CROP
+                scaleType = ImageView.ScaleType.FIT_CENTER
                 setBackgroundColor(Color.rgb(20 + (frameId % 3) * 3, 31, 82))
                 contentDescription = "Storyboard frame $frameId"
                 layoutParams = FrameLayout.LayoutParams(-1, -1)
@@ -573,9 +639,15 @@ class MainActivity : Activity() {
                 refreshSelection()
                 true
             }
+            val gridHorizontalPadding = dp(4)
+            val cellMargins = dp(2)
+            val availableWidth = (resources.displayMetrics.widthPixels - gridHorizontalPadding - dp(2)).coerceAtLeast(dp(1))
+            val tileWidth = ((availableWidth - cellMargins * columnCount) / columnCount).coerceAtLeast(dp(1))
+            val tileHeight = (tileWidth / videoAspectRatio).toInt().coerceAtLeast(dp(1))
             val params = GridLayout.LayoutParams().apply {
-                width = 0; height = dp(76)
-                columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                width = tileWidth
+                height = tileHeight
+                columnSpec = GridLayout.spec(GridLayout.UNDEFINED)
                 setMargins(dp(1), dp(1), dp(1), dp(1))
             }
             grid.addView(tile, params)
@@ -588,20 +660,44 @@ class MainActivity : Activity() {
 
     private fun startTwoFrameProcessors(uri: Uri, durationMs: Long, generation: Int) {
         extractionDone = 0; processorProgress[0] = 0; processorProgress[1] = 0
-        val midpoint = storyboardFrameCount / 2
-        Thread({ extractFrameRange(uri, durationMs, 0, midpoint, generation, 0) }, "EWVE-Frame-1").start()
-        Thread({ extractFrameRange(uri, durationMs, midpoint, storyboardFrameCount, generation, 1) }, "EWVE-Frame-2").start()
+        // Interleave frame indices so both workers populate the beginning of the storyboard
+        // together instead of one worker filling frames 1-60 while the other fills 61-120.
+        Thread({
+            extractFrameRange(uri, durationMs, 0, storyboardFrameCount, 2, generation, 0)
+        }, "EWVE-Frame-1").start()
+        Thread({
+            extractFrameRange(uri, durationMs, 1, storyboardFrameCount, 2, generation, 1)
+        }, "EWVE-Frame-2").start()
     }
 
-    private fun extractFrameRange(uri: Uri, durationMs: Long, start: Int, end: Int,
+    private fun extractFrameRange(uri: Uri, durationMs: Long, start: Int, end: Int, stride: Int,
                                   generation: Int, processor: Int) {
         val retriever = MediaMetadataRetriever()
         try {
             retriever.setDataSource(this, uri)
-            for (index in start until end) {
+            // Decode storyboard frames at thumbnail resolution where supported instead of
+            // decoding every source frame at full video resolution and shrinking it afterward.
+            val sourceWidth = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                ?.toIntOrNull()?.coerceAtLeast(1) ?: 16
+            val sourceHeight = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                ?.toIntOrNull()?.coerceAtLeast(1) ?: 9
+            val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+                ?.toIntOrNull() ?: 0
+            val displayWidth = if (rotation == 90 || rotation == 270) sourceHeight else sourceWidth
+            val displayHeight = if (rotation == 90 || rotation == 270) sourceWidth else sourceHeight
+            val scale = min(1f, min(240f / displayWidth, 150f / displayHeight))
+            val decodeWidth = (displayWidth * scale).toInt().coerceAtLeast(1)
+            val decodeHeight = (displayHeight * scale).toInt().coerceAtLeast(1)
+            for (index in start until end step stride) {
                 if (generation != extractionGeneration) break
                 val timeUs = durationMs * 1000L * index / (storyboardFrameCount - 1)
-                val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                val frame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                    retriever.getScaledFrameAtTime(
+                        timeUs, MediaMetadataRetriever.OPTION_CLOSEST, decodeWidth, decodeHeight
+                    )
+                } else {
+                    retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                }
                 val thumb = frame?.let { makeThumbnail(it) }
                 if (frame != null && thumb !== frame && !frame.isRecycled) frame.recycle()
                 runOnUiThread {
@@ -610,12 +706,21 @@ class MainActivity : Activity() {
                         return@runOnUiThread
                     }
                     if (thumb != null) {
+                        if (index == 0 && thumb.width > 0 && thumb.height > 0) {
+                            // The decoded frame is the final authority for the thumbnail's display shape.
+                            // Metadata rotation is already applied by the display-ratio helper.
+                            val thumbRatio = thumb.width.toFloat() / thumb.height.toFloat()
+                            if (thumbRatio in 0.2f..5f && abs(thumbRatio - videoAspectRatio) < 0.08f) {
+                                videoAspectRatio = thumbRatio
+                                renderStoryboard()
+                            }
+                        }
                         val id = index + 1
                         frameBitmaps.put(id, thumb)?.let { old ->
                             if (old !== thumb && !old.isRecycled) old.recycle()
                         }
                         frameImageViews[id]?.setImageBitmap(thumb)
-                        if (id == 1 && !video.isPlaying) {
+                        if (id == 1 && !video.isPlaying && preview.drawable == null) {
                             preview.setImageBitmap(thumb)
                             preview.visibility = View.VISIBLE
                         }
