@@ -158,8 +158,9 @@ class MainActivity : Activity() {
         left.addView(button("Cancel", 16f, Color.LTGRAY, Color.rgb(20, 29, 44)).apply {
             setOnClickListener {
                 if (video.isPlaying) video.pause()
-                video.visibility = View.VISIBLE
+                video.visibility = View.INVISIBLE
                 preview.visibility = View.VISIBLE
+                preview.bringToFront()
                 if (videos.isNotEmpty()) showPreviewAt(video.currentPosition.toLong(), videos[currentVideoIndex])
                 playControl?.text = "Play\n⏯"
             }
@@ -182,8 +183,9 @@ class MainActivity : Activity() {
             if (!videoReady) toast("ابتدا ویدیو وارد کنید")
             else if (video.isPlaying) {
                 video.pause()
-                video.visibility = View.VISIBLE
+                video.visibility = View.INVISIBLE
                 preview.visibility = View.VISIBLE
+                preview.bringToFront()
                 showPreviewAt(video.currentPosition.toLong(), videos[currentVideoIndex])
                 play.text = "Play\n⏯"
             } else {
@@ -263,7 +265,14 @@ class MainActivity : Activity() {
         right.addView(button("Cover\nFrame 🖼", 13f).apply {
             setOnClickListener {
                 val bmp = frameBitmaps[1]
-                if (bmp != null) { preview.setImageBitmap(bmp); preview.visibility = View.VISIBLE }
+                if (bmp != null) {
+                    if (video.isPlaying) video.pause()
+                    video.visibility = View.INVISIBLE
+                    preview.setImageBitmap(bmp)
+                    preview.visibility = View.VISIBLE
+                    preview.bringToFront()
+                    playControl?.text = "Play\n⏯"
+                }
                 else toast("هنوز فریمی استخراج نشده است")
             }
             layoutParams = LinearLayout.LayoutParams(-1, 0, 1f)
@@ -449,12 +458,13 @@ class MainActivity : Activity() {
         videoDurationMs = 0L
         videoReady = false
         videoAspectRatio = readDisplayAspectRatio(uri)
-        video.visibility = View.VISIBLE
+        video.visibility = View.INVISIBLE
         mediaPlayer = null
         playControl?.text = "Play\n⏯"
         video.stopPlayback()
         preview.setImageDrawable(null)
         preview.visibility = View.VISIBLE
+        preview.bringToFront()
         showPreviewAt(0L, uri, generation)
         playerHint?.text = "Loading video..."
         playerHint?.visibility = View.VISIBLE
@@ -486,6 +496,10 @@ class MainActivity : Activity() {
             }
             mp.setOnCompletionListener { playControl?.text = "Play\n⏯" }
             playerHint?.visibility = View.GONE
+            video.pause()
+            video.visibility = View.INVISIBLE
+            preview.visibility = View.VISIBLE
+            preview.bringToFront()
             startTwoFrameProcessors(uri, videoDurationMs, generation)
         }
         video.setOnErrorListener { _, what, extra ->
@@ -620,6 +634,9 @@ class MainActivity : Activity() {
                 layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START)
             })
             tile.setOnClickListener {
+                // A tap both selects the storyboard cell and seeks/plays the source video
+                // from the timestamp represented by this original frame number.
+                playFromStoryboardFrame(frameId)
                 saveUndo()
                 rangeAnchor = frameId
                 if (!selectedFrames.add(frameId)) selectedFrames.remove(frameId)
@@ -656,6 +673,22 @@ class MainActivity : Activity() {
             frameBitmaps[frameId]?.let { image.setImageBitmap(it) }
         }
         refreshSelection()
+    }
+
+    private fun playFromStoryboardFrame(frameId: Int) {
+        if (!videoReady || videos.isEmpty() || videoDurationMs <= 0L) {
+            toast("ویدیو هنوز آماده پخش نیست")
+            return
+        }
+        val frameIndex = (frameId - 1).coerceIn(0, storyboardFrameCount - 1)
+        val targetMs = (videoDurationMs * frameIndex / (storyboardFrameCount - 1))
+            .coerceIn(0L, videoDurationMs)
+        preview.visibility = View.GONE
+        video.visibility = View.VISIBLE
+        video.seekTo(targetMs.toInt())
+        video.start()
+        playControl?.text = "Pause\\n⏸"
+        playerHint?.visibility = View.GONE
     }
 
     private fun startTwoFrameProcessors(uri: Uri, durationMs: Long, generation: Int) {
